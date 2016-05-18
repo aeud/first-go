@@ -1,4 +1,4 @@
-package bqwrite
+package main
 
 import (
 	"bytes"
