@@ -20,28 +20,89 @@ import (
 const (
 	projectId      = "luxola.com:luxola-analytics"
 	datasetId      = "go"
-	tableId        = "test"
+	tableId        = "toto"
 	BQModeNullable = "NULLABLE"
 	BQTypeInteger  = "INTEGER"
-	objectName     = "test-file.txt.gz"
+	objectName     = "transactions-test.json.gz"
 	bucketName     = "lx-ga"
+	//googleCredentialsPath = "/Users/adrien/.ssh/google.json"
+	googleCredentialsPath = "/home/ubuntu/.ssh/google.json"
 )
 
-type Transaction struct {
-	TransId   int
-	AccountId int
+type Column struct {
+	Name string
+	Type string
 }
 
-func insertRows(transactions []*Transaction) {
-	var dbConf string
-	dbConfBytes, err := ioutil.ReadFile("./mssql.txt")
+type Schema []Column
+
+func (schema *Schema) GetRow() Row {
+	l := len(*schema)
+	s := make([]interface{}, l)
+	m := make(map[string]interface{})
+	for i := 0; i < l; i++ {
+		t := (*schema)[i].Type
+		n := (*schema)[i].Name
+		v := stringType(t)
+		s[i] = v
+		m[n] = v
+	}
+	return Row{m, s}
+}
+
+type Row struct {
+	mapable  map[string]interface{}
+	scanable []interface{}
+}
+
+func (r *Row) ToJson() []byte {
+	s, err := json.Marshal(r.mapable)
 	if err != nil {
 		log.Fatal(err)
-	} else {
-		dbConf = string(dbConfBytes)
 	}
+	return s
+}
 
-	data, err := ioutil.ReadFile("/Users/adrien/.ssh/google.json")
+type Export struct {
+	Schema Schema
+	Query  string
+}
+
+var dbConf string
+
+var export Export
+
+func stringType(s string) interface{} {
+	switch {
+	case s == "int":
+		return new(int)
+	case s == "string":
+		return new(string)
+	case s == "float":
+		return new(float32)
+	case s == "bool":
+		return new(bool)
+	}
+	return new(string)
+}
+
+func stringBQType(s string) string {
+	switch {
+	case s == "int":
+		return "INTEGER"
+	case s == "string":
+		return "STRING"
+	case s == "float":
+		return "FLOAT"
+	case s == "bool":
+		return "BOOLEAN"
+	}
+	return "STRING"
+}
+
+func createTable() {
+
+	data, err := ioutil.ReadFile(googleCredentialsPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,95 +113,137 @@ func insertRows(transactions []*Transaction) {
 	}
 
 	client := conf.Client(oauth2.NoContext)
-	service, _ := bigquery.New(client)
-
-	tablesService := bigquery.NewTablesService(service)
-
-	tableDeleteCall := tablesService.Delete(projectId, datasetId, tableId)
-	if tableDeleteCall.Do() != nil {
-		fmt.Println("Nothing to delete")
+	service, err := bigquery.New(client)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	tableReference := new(bigquery.TableReference)
-	tableReference.DatasetId = datasetId
-	tableReference.ProjectId = projectId
-	tableReference.TableId = tableId
+	jobsService := bigquery.NewJobsService(service)
 
-	tableSchemaField := new(bigquery.TableFieldSchema)
-	tableSchemaField.Mode = BQModeNullable
-	tableSchemaField.Name = "testField"
-	tableSchemaField.Type = BQTypeInteger
+	tableReference := bigquery.TableReference{
+		DatasetId: datasetId,
+		ProjectId: projectId,
+		TableId:   tableId,
+	}
+
+	tableFields := make([]*bigquery.TableFieldSchema, len(export.Schema))
+
+	for i := 0; i < len(export.Schema); i++ {
+		c := export.Schema[i]
+		tableSchemaField := new(bigquery.TableFieldSchema)
+		tableSchemaField.Mode = BQModeNullable
+		tableSchemaField.Name = c.Name
+		tableSchemaField.Type = stringBQType(c.Type)
+		tableFields[i] = tableSchemaField
+	}
 
 	tableSchema := new(bigquery.TableSchema)
-	tableSchema.Fields = []*bigquery.TableFieldSchema{tableSchemaField}
+	tableSchema.Fields = tableFields
 
-	table := new(bigquery.Table)
-	table.TableReference = tableReference
-	table.Schema = tableSchema
-	tableInsertCall := tablesService.Insert(projectId, datasetId, table)
-	table, err = tableInsertCall.Do()
+	bs, _ := tableSchema.MarshalJSON()
+	fmt.Println(string(bs))
+
+	jobConfigurationLoad := bigquery.JobConfigurationLoad{
+		DestinationTable: &tableReference,
+		Schema:           tableSchema,
+		SourceFormat:     "NEWLINE_DELIMITED_JSON",
+		SourceUris:       []string{fmt.Sprintf("gs://%v/%v", bucketName, objectName)},
+		WriteDisposition: "WRITE_TRUNCATE",
+	}
+
+	jogConfiguration := bigquery.JobConfiguration{
+		Load: &jobConfigurationLoad,
+	}
+
+	job := bigquery.Job{
+		Configuration: &jogConfiguration,
+	}
+
+	jobsInsertCall := jobsService.Insert(projectId, &job)
+	insertJob, err := jobsInsertCall.Do()
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(table.Id)
 
-	tableDataInsertService := bigquery.NewTabledataService(service)
-	tableDataInsertAllRequest := new(bigquery.TableDataInsertAllRequest)
-
-	tableDataInsertAllRequestRow := new(bigquery.TableDataInsertAllRequestRows)
-
-	tableDataInsertAllRequestRows := make([]*bigquery.TableDataInsertAllRequestRows, len(transactions))
-
-	for i := 0; i < len(transactions); i++ {
-		transaction := transactions[i]
-		v := make(map[string]bigquery.JsonValue)
-		v["testField"] = transaction.TransId
-		tableDataInsertAllRequestRow.Json = v
-		tableDataInsertAllRequestRows = append(tableDataInsertAllRequestRows, tableDataInsertAllRequestRow)
-	}
-
-	tableDataInsertAllRequest.Rows = tableDataInsertAllRequestRows
-	tableInsertAllCall := tableDataInsertService.InsertAll(projectId, datasetId, tableId, tableDataInsertAllRequest)
-
-	_, err = tableInsertAllCall.Do()
+	jobsGetCall := jobsService.Get(projectId, insertJob.JobReference.JobId)
+	gotJob, err := jobsGetCall.Do()
 	if err != nil {
 		log.Fatal(err)
+	}
+	fmt.Println(gotJob.Status)
+
+	for gotJob.Status.State != "DONE" {
+		jobsGetCall = jobsService.Get(projectId, insertJob.JobReference.JobId)
+		gotJob, err = jobsGetCall.Do()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(gotJob.Status)
+		if gotJob.Status.ErrorResult != nil {
+			fmt.Println(gotJob.Status.ErrorResult)
+			for i := 0; i < len(gotJob.Status.Errors); i++ {
+				fmt.Println(gotJob.Status.Errors[i])
+			}
+		}
+		time.Sleep(time.Second)
 	}
 }
 
-func queryDb() []*Transaction {
+func queryDb() []*Row {
 	t0 := time.Now()
-	//q := "select top 10 t.account_id as account_id from dbo.dimaccount t"
+	schema := Schema{
+		Column{"AccountId", "int"},
+		Column{"TransactionId", "int"},
+		Column{"TransactionTime", "string"},
+		Column{"SalesLCY", "float"},
+		Column{"SalesSGD", "float"},
+		Column{"ProductId", "int"},
+		Column{"Country", "int"},
+		Column{"StoreId", "int"},
+	}
 	q := `
-select top 100 t.trans_id, t.account_id
-from dbo.dimtrans t
-    `
-	// , t.account_id, t.store_id, t.total_qtys, t.total_sales, t.trans_time
+select
+    account_id as AccountId,
+    trans_id as TransactionId,
+    trans_time as TransactionTime,
+    sales as SalesLCY,
+    sales_basic_currency as SalesSGD,
+    product_id as ProductId,
+    subscription_country as SubscriptionCountry,
+    store_id as StoreId
+from
+    dbo.FactTrans
+	`
+	export = Export{schema, q}
 	db, err := sql.Open("mssql", dbConf)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(q)
 	rows, err := db.Query(q)
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer rows.Close()
 	defer db.Close()
-	transactions := make([]*Transaction, 0)
+	rs := make([]*Row, 0)
 	for rows.Next() {
-		var transaction = new(Transaction)
-		if err := rows.Scan(&transaction.TransId, &transaction.AccountId); err != nil {
+		r := export.Schema.GetRow()
+		s := r.scanable
+		if err := rows.Scan(s...); err != nil {
 			log.Fatal(err)
 		}
-		transactions = append(transactions, transaction)
+		rs = append(rs, &r)
 	}
 	if err := rows.Err(); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Executed in %v\n", time.Now().Sub(t0))
-	return transactions
+	return rs
 }
 
-func writeFile(transactions []*Transaction) {
-	data, err := ioutil.ReadFile("/Users/adrien/.ssh/google.json")
+func writeFile(rs []*Row) {
+	data, err := ioutil.ReadFile(googleCredentialsPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -160,10 +263,9 @@ func writeFile(transactions []*Transaction) {
 
 	var b bytes.Buffer
 	w := gzip.NewWriter(&b)
-	for i := 0; i < len(transactions); i++ {
-		transaction := transactions[i]
-		textJson, _ := json.Marshal(transaction)
-		w.Write(textJson)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		w.Write(r.ToJson())
 		w.Write([]byte("\n"))
 	}
 	w.Close()
@@ -178,5 +280,13 @@ func writeFile(transactions []*Transaction) {
 }
 
 func main() {
+	dbConfBytes, err := ioutil.ReadFile("./mssql.txt")
+	if err != nil {
+		log.Fatal(err)
+	} else {
+		dbConf = string(dbConfBytes)
+	}
+	fmt.Println(dbConf)
 	writeFile(queryDb())
+	createTable()
 }
