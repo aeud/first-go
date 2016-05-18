@@ -13,6 +13,7 @@ import (
 	storage "google.golang.org/api/storage/v1"
 	"io/ioutil"
 	"log"
+	"os"
 	"strings"
 	"time"
 )
@@ -280,12 +281,7 @@ func writeFile(rs []*Row) {
 }
 
 func main() {
-	dbConfBytes, err := ioutil.ReadFile("./mssql.txt")
-	if err != nil {
-		log.Fatal(err)
-	} else {
-		dbConf = string(dbConfBytes)
-	}
+	dbConf = os.Getenv("DBCONF")
 	fmt.Println(dbConf)
 	writeFile(queryDb())
 	createTable()
