@@ -50,15 +50,15 @@ func getItem(id int, s *Item, wg *sync.WaitGroup) {
 }
 
 func sendMail(body string) {
-	auth := smtp.PlainAuth("", "adrien@eudes.co", "testtest", "smtp.mailgun.org")
-	to := []string{"adrien@eudes.co", "souamoureuse@gmail.com"}
-	msg := []byte("To: adrien@eudes.co,souamoureuse@gmail.com\r\n" +
+	auth := smtp.PlainAuth("", "", "", "smtp.mailgun.org")
+	to := []string{""}
+	msg := []byte("To: \r\n" +
 		"Subject: Top 20 Hacker news\r\n" +
 		"MIME-version: 1.0\r\n" +
 		"Content-Type: text/html; charset=\"UTF-8\"\r\n" +
 		"\r\n" +
 		fmt.Sprintf("<html>%v</html>", body))
-	err := smtp.SendMail("smtp.mailgun.org:25", auth, "adrien@eudes.co", to, msg)
+	err := smtp.SendMail("smtp.mailgun.org:25", auth, "", to, msg)
 	if err != nil {
 		log.Fatal(err)
 	}
